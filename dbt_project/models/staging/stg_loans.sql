@@ -1,0 +1,117 @@
+
+-- First transformation layer. Takes raw_loans (151 columns) and:
+-- 1. Drops ~75 columns that cause data leakage or have no predictive value
+-- 2. Casts string columns to correct numeric types
+-- 3. Filters to only rows with known outcomes (Fully Paid or Charged Off)
+--
+-- Data leakage: some columns only exist AFTER a loan defaults
+-- (e.g. recoveries, total_pymnt, last_pymnt_amnt)
+-- Including these lets the model cheat — it sees post-default info
+-- that would never exist at scoring time in production
+
+WITH source AS (
+    -- Pull from raw_loans table in DuckDB
+-- The source macro below tells dbt this is an external table, not a dbt model.
+    SELECT * FROM {{ source('raw', 'raw_loans') }}
+),
+
+filtered AS (
+    -- Keep only loans with known final outcomes
+    -- Fully Paid = repaid = label 0
+    -- Charged Off = defaulted = label 1
+    -- Current, Late, In Grace Period excluded — outcome still unknown
+    SELECT * FROM source
+    WHERE loan_status IN ('Fully Paid', 'Charged Off')
+),
+
+renamed AS (
+    SELECT
+        -- ── Loan characteristics ──────────────────────────────
+        id                                                  AS loan_id,
+        loan_amnt,
+        funded_amnt,
+
+        -- term comes as ' 36 months' — strip to integer
+        CAST(REGEXP_REPLACE(term, '[^0-9]', '', 'g') AS INTEGER) AS term,
+        -- CAST(REPLACE(REPLACE(term, ' months', ''), ' ', '')
+            -- AS INTEGER)                                     AS term,
+
+        -- int_rate comes as '13.56%' — strip % and cast to float
+        CAST(int_rate AS FLOAT)         AS int_rate,
+
+        installment,
+        grade,
+        sub_grade,
+        purpose,
+        home_ownership,
+        verification_status,
+        loan_status,
+
+        -- ── Borrower financials ───────────────────────────────
+        annual_inc,
+        dti,
+        -- emp_length kept as string here — converted in int_loans_cleaned
+        emp_length,
+
+        -- ── Credit history at origination ─────────────────────
+        fico_range_low,
+        fico_range_high,
+        earliest_cr_line,
+        open_acc,
+        pub_rec,
+        revol_bal,
+
+        -- revol_util comes as '54.3%' — strip % and cast
+        CAST(revol_util AS FLOAT)        AS revol_util,
+
+        total_acc,
+        delinq_2yrs,
+        inq_last_6mths,
+        mths_since_last_delinq,
+        mths_since_last_record,
+
+        -- ── Credit bureau detail ──────────────────────────────
+        tot_cur_bal,
+        total_rev_hi_lim,
+        acc_open_past_24mths,
+        avg_cur_bal,
+        bc_open_to_buy,
+        bc_util,
+        mort_acc,
+        num_actv_bc_tl,
+        num_bc_sats,
+        num_il_tl,
+        num_op_rev_tl,
+        num_rev_accts,
+        num_sats,
+        pct_tl_nvr_dlq,
+        percent_bc_gt_75,
+        pub_rec_bankruptcies,
+        tax_liens,
+        tot_hi_cred_lim,
+        total_bal_ex_mort,
+        total_bc_limit,
+        mths_since_last_major_derog,
+
+        -- ── Date for train/test split ─────────────────────────
+        -- Used in fct_loans to create chronological split flag
+        issue_d
+
+        -- ── EXCLUDED — data leakage (~35 cols) ────────────────
+        -- total_pymnt, recoveries, last_pymnt_amnt, last_pymnt_d
+        -- hardship_*, settlement_*, debt_settlement_flag
+        -- out_prncp, total_rec_prnc, total_rec_int
+        --
+        -- ── EXCLUDED — admin/identifiers (~25 cols) ───────────
+        -- member_id, url, desc, title, zip_code, addr_state
+        -- policy_code, pymnt_plan, application_type
+        --
+        -- ── EXCLUDED — sparse joint fields (~15 cols) ─────────
+        -- annual_inc_joint, dti_joint, sec_app_* (< 2% populated)
+
+    FROM filtered
+)
+
+SELECT *
+FROM renamed
+WHERE dti IS NOT NULL
